@@ -26,21 +26,21 @@ ALLOWED_REGION = "BD"
 BD_LIKE_URL = "https://clientbp.ggpolarbear.com/LikeProfile"
 BD_INFO_URL = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
 
-# ⚙️ Batch rotation config
-# token_bd.json এ মোট 240 guest id → 2 batch × 120
-BATCH_SIZE = 120              # ✅ প্রতি batch এ 120 token (guest id)
-LIKES_PER_UID = 111           # ✅ প্রতি UID এ সর্বোচ্চ 111 like
-TOKEN_DAILY_LIMIT = 30        # ✅ প্রতিটা token দিনে 30 বার like
-DAILY_LIMIT = 500             # দিনে 500 user target (upper cap)
-TOKEN_FAIL_THRESHOLD = 5      # 5 বার fail হলে token skip
+# ⚙️ Config
+LIKES_PER_USER       = 100     # ✅ প্রতি user এ ১০০ like
+TOKEN_DAILY_LIMIT    = 50      # ✅ প্রতিটা guest token দিনে ৫০ বার like
+TOKEN_FAIL_THRESHOLD = 5       # ৫ বার fail হলে token skip
+BATCH_SIZE           = 115     # ✅ প্রথম ব্যাচ ১১৫, দ্বিতীয় ব্যাচ ১১৫ (মোট ২৩০)
+EXPECTED_TOKENS      = 230     # ✅ token_bd.json এ ২৩০ টা guest id
+DAILY_LIMIT          = 500     # daily user cap (safety)
 
 # 📊 State management
-used_count = 0
-token_usage = {}
-token_failures = {}
-current_batch = 0
+used_count      = 0
+token_usage     = {}
+token_failures  = {}
+current_batch   = 0
 last_reset_date = date.today()
-lock = threading.Lock()
+lock            = threading.Lock()
 
 
 def reset_if_new_day():
@@ -58,7 +58,15 @@ def reset_if_new_day():
 def load_tokens():
     try:
         with open("token_bd.json", "r") as f:
-            return json.load(f)
+            tokens = json.load(f)
+        if not isinstance(tokens, list):
+            app.logger.error("token_bd.json must be a list of {'token': ...}")
+            return None
+        if len(tokens) < EXPECTED_TOKENS:
+            app.logger.warning(
+                f"⚠️ token_bd.json এ {len(tokens)} টা token, প্রত্যাশিত {EXPECTED_TOKENS}"
+            )
+        return tokens
     except Exception as e:
         app.logger.error(f"Error loading BD tokens: {e}")
         return None
@@ -67,7 +75,7 @@ def load_tokens():
 def encrypt_message(plaintext):
     try:
         key = b'Yg&tc%DEuh6%Zc^8'
-        iv = b'6oyZDr22E3ychjM%'
+        iv  = b'6oyZDr22E3ychjM%'
         cipher = AES.new(key, AES.MODE_CBC, iv)
         padded_message = pad(plaintext, AES.block_size)
         encrypted_message = cipher.encrypt(padded_message)
@@ -119,43 +127,38 @@ async def send_request(encrypted_uid, token, url):
 
 def get_available_tokens(tokens):
     """
-    ✅ Batch rotation logic (2 batch × 120 = 240 token):
-    - Batch 0: token 0-119 (প্রথম 120 guest id)
-    - Batch 1: token 120-239 (পরের 120 guest id)
-
-    প্রতি UID এ সর্বোচ্চ LIKES_PER_UID (111) টা token ব্যবহার হবে।
-    Batch 0 এর সব token exhausted হলে → batch 1
+    ✅ current_batch (১১৫ token) থেকে available টোকেন নেয়।
+    ✅ সব শেষ হলে পরের ব্যাচে যায় (২য় ১১৫ = মোট ২৩০)।
     """
     global current_batch, token_usage, token_failures
 
     total_batches = (len(tokens) + BATCH_SIZE - 1) // BATCH_SIZE
 
-    while current_batch < total_batches:
-        start = current_batch * BATCH_SIZE
-        end = min(start + BATCH_SIZE, len(tokens))
+    for batch_idx in range(current_batch, total_batches):
+        start = batch_idx * BATCH_SIZE
+        end   = min(start + BATCH_SIZE, len(tokens))
         batch_tokens = []
 
         for idx in range(start, end):
-            used = token_usage.get(idx, 0)
+            used  = token_usage.get(idx, 0)
             fails = token_failures.get(idx, 0)
+            # ✅ প্রতিটা token ৫০ বার পর্যন্ত ব্যবহার
             if used < TOKEN_DAILY_LIMIT and fails < TOKEN_FAIL_THRESHOLD:
                 batch_tokens.append((idx, tokens[idx]["token"]))
-                # ✅ প্রতি UID এ সর্বোচ্চ 111 like
-                if len(batch_tokens) >= LIKES_PER_UID:
-                    break
 
         if batch_tokens:
+            current_batch = batch_idx
             return batch_tokens
-
-        # এই batch পুরো exhausted → পরের batch এ যাও
-        app.logger.info(f"➡️ Batch {current_batch} exhausted — switching to batch {current_batch + 1}")
-        current_batch += 1
 
     return None
 
 
-async def send_multiple_requests(uid, region, url):
-    global token_usage, token_failures
+async def send_multiple_requests(uid, region, url, needed_likes=LIKES_PER_USER):
+    """
+    ✅ প্রতি ইউজারকে ঠিক ১০০ লাইক দিতে সর্বোচ্চ ১০০ token ব্যবহার করে।
+    বাকিগুলো বাদ দেয় যাতে batch rotation সঠিক থাকে।
+    """
+    global token_usage, token_failures, current_batch
 
     protobuf_message = create_protobuf_message(uid, region)
     if protobuf_message is None:
@@ -172,18 +175,30 @@ async def send_multiple_requests(uid, region, url):
     if not available:
         return {"error": "All token batches exhausted for today"}
 
-    tasks = []
-    for idx, token in available:
-        tasks.append(send_request(encrypted_uid, token, url))
+    # ✅ প্রতি user এ ১০০ like → সর্বোচ্চ ১০০ টা token request
+    selected = available[:needed_likes]
 
+    tasks = [send_request(encrypted_uid, tok, url) for _, tok in selected]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for i, result in enumerate(results):
-        idx = available[i][0]
+        idx = selected[i][0]
         if isinstance(result, dict) and result.get("success"):
             token_usage[idx] = token_usage.get(idx, 0) + 1
         else:
             token_failures[idx] = token_failures.get(idx, 0) + 1
+
+    # ✅ বর্তমান ব্যাচের সব token ৫০ limit বা fail threshold শেষ হলে পরের ব্যাচে যাও
+    batch_start = current_batch * BATCH_SIZE
+    batch_end   = min(batch_start + BATCH_SIZE, len(tokens))
+    all_exhausted = all(
+        (token_usage.get(i, 0) >= TOKEN_DAILY_LIMIT or
+         token_failures.get(i, 0) >= TOKEN_FAIL_THRESHOLD)
+        for i in range(batch_start, batch_end)
+    )
+    if all_exhausted:
+        current_batch += 1
+        app.logger.info(f"➡️ Batch {current_batch} এ switch হলো")
 
     return results
 
@@ -277,7 +292,8 @@ def handle_requests():
                 raise Exception("Failed to get initial info.")
             before_like = before.AccountInfo.Likes
 
-            asyncio.run(send_multiple_requests(uid, region, BD_LIKE_URL))
+            # ✅ এখানে প্রতি user এ ১০০ লাইক পাঠানো হচ্ছে
+            asyncio.run(send_multiple_requests(uid, region, BD_LIKE_URL, LIKES_PER_USER))
 
             after = make_request(encrypted_uid, region, token)
             if after is None:
@@ -328,38 +344,20 @@ def remain_info():
         and token_failures.get(i, 0) < TOKEN_FAIL_THRESHOLD
     )
 
-    # ✅ প্রতি batch এর status
-    batch_status = []
-    for b in range(total_batches):
-        s = b * BATCH_SIZE
-        e = min(s + BATCH_SIZE, len(tokens))
-        active = sum(
-            1 for i in range(s, e)
-            if token_usage.get(i, 0) < TOKEN_DAILY_LIMIT
-            and token_failures.get(i, 0) < TOKEN_FAIL_THRESHOLD
-        )
-        batch_status.append({
-            "batch": b,
-            "token_range": f"{s}-{e-1}",
-            "tokens": e - s,
-            "active_tokens": active,
-            "exhausted": active == 0
-        })
-
     data = {
         "server": "BD",
-        "daily_limit": DAILY_LIMIT,
+        "likes_per_user": LIKES_PER_USER,
+        "token_daily_limit": TOKEN_DAILY_LIMIT,
+        "daily_limit_users": DAILY_LIMIT,
         "remaining_users": max(DAILY_LIMIT - used_count, 0),
-        "used": used_count,
+        "used_users": used_count,
         "total_tokens": len(tokens),
+        "expected_tokens": EXPECTED_TOKENS,
         "batch_size": BATCH_SIZE,
         "total_batches": total_batches,
         "current_batch": current_batch,
         "active_tokens_today": active_tokens,
-        "likes_per_uid": LIKES_PER_UID,
-        "token_daily_limit": TOKEN_DAILY_LIMIT,
         "token_fail_threshold": TOKEN_FAIL_THRESHOLD,
-        "batch_status": batch_status,
         "reset_info": "4:00 AM IST"
     }
     return jsonify(data)
