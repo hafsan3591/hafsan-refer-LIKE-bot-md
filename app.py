@@ -28,7 +28,7 @@ BD_INFO_URL = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
 
 # ⚙️ Config
 LIKES_PER_USER       = 100     # ✅ প্রতি user এ ১০০ like
-TOKEN_DAILY_LIMIT    = 50      # ✅ প্রতিটা guest token দিনে ৫০ বার like
+TOKEN_DAILY_LIMIT    = 120      # ✅ প্রতিটা guest token দিনে ৫০ বার like
 TOKEN_FAIL_THRESHOLD = 5       # ৫ বার fail হলে token skip
 BATCH_SIZE           = 115     # ✅ প্রথম ব্যাচ ১১৫, দ্বিতীয় ব্যাচ ১১৫ (মোট ২৩০)
 EXPECTED_TOKENS      = 230     # ✅ token_bd.json এ ২৩০ টা guest id
